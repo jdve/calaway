@@ -61,7 +61,7 @@ busyUntil evts = do
 
 refreshCalendarCb :: XChatPlugin Context -> () -> Context -> IO (Eating, Context)
 refreshCalendarCb ph _ ctx = do
-    path <- xChatGetInfo ph "xchatdir"
+    path <- xChatGetInfo ph "xchatdirfs"
     let script = joinPath [fromJust path, "addons", "get-events.ps1"]
     r <- try $ readProcess "powershell" [script] ""
     case r of
