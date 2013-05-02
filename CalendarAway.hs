@@ -7,18 +7,18 @@ module CalendarAway (
 
 import Control.Exception
 import Control.Monad
-import Data.Aeson
+import Data.Aeson (eitherDecode, FromJSON, DotNetTime, fromDotNetTime)
 import qualified Data.ByteString.Lazy.Char8 as B
 import Data.Data
 import Data.Maybe
 import Data.Time
-import Data.Typeable
+import Foreign.Ptr (nullPtr)
 import GHC.Generics (Generic)
 import Network.IRC.XChat.Plugin
-import System.Environment.FindBin
-import System.FilePath
-import System.Locale
-import System.Process
+import System.FilePath (joinPath)
+import System.Locale (defaultTimeLocale)
+import System.Process (readProcess)
+import System.Win32.DLL (getModuleFileName)
 
 norm :: PriorityA
 norm = abstractPriority Norm
@@ -61,8 +61,8 @@ busyUntil evts = do
 
 refreshCalendarCb :: XChatPlugin Context -> () -> Context -> IO (Eating, Context)
 refreshCalendarCb ph _ ctx = do
-    path <- xChatGetInfo ph "xchatdirfs"
-    let script = joinPath [fromJust path, "addons", "get-events.ps1"]
+    path <- getModuleFileName nullPtr
+    let script = joinPath [path, "config", "addons", "get-events.ps1"]
     r <- try $ readProcess "powershell" [script] ""
     case r of
         Left e -> xChatPrint ph ("Failed to read calendar with " ++ script ++ ": " ++ show (e :: SomeException)) >> return (eatAll, ctx)
