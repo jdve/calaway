@@ -15,7 +15,7 @@ import Data.Time
 import Foreign.Ptr (nullPtr)
 import GHC.Generics (Generic)
 import Network.IRC.XChat.Plugin
-import System.FilePath (joinPath)
+import System.FilePath (takeDirectory, joinPath)
 import System.Locale (defaultTimeLocale)
 import System.Process (readProcess)
 import System.Win32.DLL (getModuleFileName)
@@ -62,7 +62,7 @@ busyUntil evts = do
 refreshCalendarCb :: XChatPlugin Context -> () -> Context -> IO (Eating, Context)
 refreshCalendarCb ph _ ctx = do
     path <- getModuleFileName nullPtr
-    let script = joinPath [path, "config", "addons", "get-events.ps1"]
+    let script = joinPath [takeDirectory path, "config", "addons", "get-events.ps1"]
     r <- try $ readProcess "powershell" [script] ""
     case r of
         Left e -> xChatPrint ph ("Failed to read calendar with " ++ script ++ ": " ++ show (e :: SomeException)) >> return (eatAll, ctx)
