@@ -16,13 +16,11 @@ import qualified Data.ByteString.Lazy.Char8 as B
 import Data.Data
 import Data.Maybe
 import Data.Time
-import Foreign.Ptr (nullPtr)
 import GHC.Generics (Generic)
 import Network.IRC.XChat.Plugin
-import System.FilePath (takeDirectory, joinPath)
+import System.FilePath (joinPath)
 import System.Locale (defaultTimeLocale)
 import System.Process (readProcessWithExitCode)
-import System.Win32.DLL (getModuleFileName)
 
 norm :: PriorityA
 norm = abstractPriority Norm
@@ -59,10 +57,9 @@ busyUntil now evts = foldr lastMeeting now evts
                                         then (max accum (fromDotNetTime $ to evt))
                                         else accum)
 
-updateCalendar :: Context -> IO ()
-updateCalendar ctx  = do
-    path <- getModuleFileName nullPtr
-    let script = joinPath [takeDirectory path, "config", "addons", "get-events.ps1"]
+updateCalendar :: Context -> String -> IO ()
+updateCalendar ctx dir = do
+    let script = joinPath [dir, "addons", "get-events.ps1"]
 
     (_, stdout, stderr) <- readProcessWithExitCode "powershell" [script] ""
 
@@ -72,7 +69,7 @@ updateCalendar ctx  = do
 
     atomically $ writeTVar (tevts ctx) $ result
 
-    oneShotStart (timer ctx) (updateCalendar ctx) (mDelay 5)
+    oneShotStart (timer ctx) (updateCalendar ctx dir) (mDelay 5)
 
     return ()
 
@@ -125,7 +122,8 @@ pluginInit fph =
        xChatHookTimer (30*1000) ph (checkBusy ph) noMemoryMgmt
        xChatPrint ph "CalendarAway loaded successfully\n"
 
-       oneShotStart timer (updateCalendar ctx) (sDelay 10)
+       Just dir <- xChatGetInfo ph "xchatdir"
+       oneShotStart timer (updateCalendar ctx dir) (sDelay 10)
 
        return pd
 
