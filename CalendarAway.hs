@@ -5,8 +5,12 @@ module CalendarAway (
     Context
 ) where
 
-import Control.Exception
+import Control.Concurrent
+import Control.Concurrent.Timer
+import Control.Concurrent.STM.TVar
+import Control.Concurrent.Suspend
 import Control.Monad
+import Control.Monad.STM
 import Data.Aeson (eitherDecode, FromJSON, DotNetTime, fromDotNetTime)
 import qualified Data.ByteString.Lazy.Char8 as B
 import Data.Data
@@ -17,7 +21,7 @@ import GHC.Generics (Generic)
 import Network.IRC.XChat.Plugin
 import System.FilePath (takeDirectory, joinPath)
 import System.Locale (defaultTimeLocale)
-import System.Process (readProcess)
+import System.Process (readProcessWithExitCode)
 import System.Win32.DLL (getModuleFileName)
 
 norm :: PriorityA
@@ -35,60 +39,71 @@ data Event = FromTo
         to :: DotNetTime
     } deriving (Generic, Show)
 
-data Context = Events [Event] deriving (Generic, Show)
-
 instance FromJSON Event
-instance FromJSON Context
+
+data Context = Context
+    {
+        tevts :: TVar (Either String [Event]),
+        timer :: TimerIO
+    }
 
 inMeeting :: UTCTime -> Event -> Bool
 inMeeting now evt = ((fromDotNetTime $ from evt) <= now) && ((fromDotNetTime $ to evt) >= now)
 
-isBusy :: [Event] -> IO Bool
-isBusy evts = do
-    now <- getCurrentTime
-    return (foldr (\ evt accum -> accum || (inMeeting now evt)) False evts)
+isBusy :: UTCTime -> [Event] -> Bool
+isBusy now evts = foldr (\ evt accum -> accum || (inMeeting now evt)) False evts
 
-busyUntil :: [Event] -> IO UTCTime
-busyUntil evts = do
-    now <- getCurrentTime
-    return (foldr
-        (\ evt accum ->
-            if inMeeting accum evt
-            then (max accum (fromDotNetTime $ to evt))
-            else accum)
-        now
-        evts)
+busyUntil :: UTCTime -> [Event] -> UTCTime
+busyUntil now evts = foldr lastMeeting now evts
+    where lastMeeting = (\ evt accum -> if inMeeting accum evt
+                                        then (max accum (fromDotNetTime $ to evt))
+                                        else accum)
 
-refreshCalendarCb :: XChatPlugin Context -> () -> Context -> IO (Eating, Context)
-refreshCalendarCb ph _ ctx = do
+updateCalendar :: Context -> IO ()
+updateCalendar ctx  = do
     path <- getModuleFileName nullPtr
     let script = joinPath [takeDirectory path, "config", "addons", "get-events.ps1"]
-    r <- try $ readProcess "powershell" [script] ""
-    case r of
-        Left e -> xChatPrint ph ("Failed to read calendar with " ++ script ++ ": " ++ show (e :: SomeException)) >> return (eatAll, ctx)
-        Right json ->
-            case (eitherDecode (B.pack json)) of
-                Left error -> xChatPrint ph ("Failed to parse " ++ json ++ ": " ++ error) >> return (eatAll, ctx)
-                Right evts -> return (eatAll, Events evts)
 
-checkLockedCb :: XChatPlugin Context -> () -> Context -> IO (Eating, Context)
-checkLockedCb ph _ (Events evts) = do
-    busy <- isBusy evts
-    until <- busyUntil evts
+    (_, stdout, stderr) <- readProcessWithExitCode "powershell" [script] ""
+
+    let result = case eitherDecode (B.pack stdout) of
+                    Left err -> Left ("Failed to parse calendar: " ++ stderr ++ "\n\n" ++ stdout ++ "\n\n" ++ err)
+                    Right evts -> Right evts
+
+    atomically $ writeTVar (tevts ctx) $ result
+
+    oneShotStart (timer ctx) (updateCalendar ctx) (mDelay 5)
+
+    return ()
+
+showCalendar :: XChatPlugin Context -> String -> Context -> IO (Eating, Context)
+showCalendar ph _ ctx = do
+    val <- atomically $ readTVar (tevts ctx)
+
+    case val of
+        Left err -> xChatPrint ph err
+        Right evts -> xChatPrint ph (show evts)
+
+    return (eatAll, ctx)
+
+checkBusy :: XChatPlugin Context -> () -> Context -> IO (Eating, Context)
+checkBusy ph _ ctx = do
+    now <- getCurrentTime
     away <- xChatGetInfo ph "away"
     tz <- getCurrentTimeZone
+    val <- atomically $ readTVar (tevts ctx)
 
-    let local = (utcToZonedTime tz until)
-        formatted = formatTime (defaultTimeLocale) "%I:%M%P" local
+    case val of
+        Left err -> return ()
+        Right evts -> do
+            let busy = isBusy now evts
+                local = (utcToZonedTime tz $ busyUntil now evts)
+                formatted = formatTime (defaultTimeLocale) "%I:%M%P %Z" local
 
-    when (busy && (isNothing away)) (xChatCommand ph ("AWAY In meetings until " ++ formatted))
-    when ((not busy) && (isJust away)) (xChatCommand ph "BACK")
+            when (busy && (isNothing away)) (xChatCommand ph ("AWAY In meetings until " ++ formatted))
+            when ((not busy) && (isJust away)) (xChatCommand ph "BACK")
 
-    return (eatAll, (Events evts))
-
-showCalendarCb :: XChatPlugin Context -> String -> Context -> IO (Eating, Context)
-showCalendarCb ph _ (Events evts) =
-    xChatPrint ph (show evts) >> return (eatAll, (Events evts))
+    return (eatAll, ctx)
 
 pluginInit :: (Context -> IO (XChatPlugin Context)) -> IO PluginDescriptor
 pluginInit fph =
@@ -96,12 +111,21 @@ pluginInit fph =
         noMemoryMgmt b = return ((), b)
     in
 
-    do ph <- fph (Events [])
+    do
+       tevts <- atomically $ newTVar $ Right []
+       timer <- newTimer
+
+       let ctx = Context { tevts = tevts, timer = timer }
+
+       ph <- fph ctx
+
        xChatHookCommand "Calendar" norm
                         (Just "Usage: CALENDAR, Shows calendar events for today")
-                        ph (showCalendarCb ph) noMemoryMgmt
-       xChatHookTimer (15*60*1000) ph (refreshCalendarCb ph) noMemoryMgmt
-       xChatHookTimer (30*1000) ph (checkLockedCb ph) noMemoryMgmt
+                        ph (showCalendar ph) noMemoryMgmt
+       xChatHookTimer (30*1000) ph (checkBusy ph) noMemoryMgmt
        xChatPrint ph "CalendarAway loaded successfully\n"
+
+       oneShotStart timer (updateCalendar ctx) (sDelay 10)
+
        return pd
 
