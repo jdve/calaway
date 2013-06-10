@@ -26,8 +26,7 @@ foreign export ccall "hexchat_plugin_init" xChatPluginInitM
      Ptr CString -> Ptr CString -> Ptr CString -> CString -> IO CInt
 
 xChatPluginDeinitM :: IO CInt
-xChatPluginDeinitM =
-  return 1
+xChatPluginDeinitM = return 1
 foreign export ccall "xchat_plugin_deinit" xChatPluginDeinitM
   :: IO CInt
 foreign export ccall "hexchat_plugin_deinit" xChatPluginDeinitM
